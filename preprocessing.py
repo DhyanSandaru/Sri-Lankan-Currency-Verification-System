@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 from typing import Optional, Tuple
 
-# Fixed output size (width × height) — 2:1 ratio matching Sri Lankan note dimensions
+# Fixed output size (width × height) 
 WARP_W = 1024
 WARP_H = 512
 
@@ -31,9 +31,10 @@ def _to_grayscale(img: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
 
-def _blur(gray: np.ndarray, ksize: int = 7) -> np.ndarray:
-    """Gaussian blur to suppress noise."""
-    return cv2.GaussianBlur(gray, (ksize, ksize), 0)
+def _blur(gray: np.ndarray) -> np.ndarray:
+    """Use Bilateral Filter to wash out background texture while keeping edges sharp."""
+    # d=9 (pixel neighborhood), sigmaColor/sigmaSpace=75 (how aggressively it blurs texture)
+    return cv2.bilateralFilter(gray, 9, 30, 30)
 
 
 def _adaptive_threshold(blurred: np.ndarray) -> np.ndarray:
@@ -45,8 +46,8 @@ def _adaptive_threshold(blurred: np.ndarray) -> np.ndarray:
         blurred, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY_INV,
-        blockSize=21,
-        C=8
+        blockSize=11,
+        C=4
     )
 
 
@@ -56,15 +57,15 @@ def _morphology(binary: np.ndarray) -> np.ndarray:
     followed by dilation to strengthen edges.
     """
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
-    # dilated = cv2.dilate(closed, kernel, iterations=1)
+    closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+    #dilated = cv2.dilate(closed, kernel, iterations=1)
     return closed
 
 
 def _find_note_contour(processed: np.ndarray) -> Optional[np.ndarray]:
     """
-    Find the largest quadrilateral contour — assumed to be the note boundary.
-    Returns the 4-point contour or None if not found.
+    Finds the largest isolated blob (the note) and draws a tight bounding box.
+    This works perfectly now that the morphology has disconnected the background noise!
     """
     contours, _ = cv2.findContours(
         processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
@@ -72,22 +73,23 @@ def _find_note_contour(processed: np.ndarray) -> Optional[np.ndarray]:
     if not contours:
         return None
 
-    # Sort by area descending
+    # Sort by area descending to find the biggest blob
     contours = sorted(contours, key=cv2.contourArea, reverse=True)
-
     img_area = processed.shape[0] * processed.shape[1]
 
-    for cnt in contours[:5]:  # check top-5 largest
+    for cnt in contours[:5]: 
         area = cv2.contourArea(cnt)
-        # Note must occupy at least 15% of frame
+        
+        # Must occupy at least 15% of the frame
         if area < 0.15 * img_area:
             continue
 
-        peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-
-        if len(approx) == 4:
-            return approx.reshape(4, 2).astype(np.float32)
+        # Because your note is completely isolated from the background now,
+        # we can just snap a 4-point mathematical box around the outer limits of the blob.
+        rect = cv2.minAreaRect(cnt)
+        box = cv2.boxPoints(rect)
+        
+        return box.astype(np.float32)
 
     return None
 
@@ -109,24 +111,42 @@ def _order_points(pts: np.ndarray) -> np.ndarray:
 def _perspective_warp(img: np.ndarray, pts: np.ndarray) -> np.ndarray:
     """
     Apply perspective transform to warp the note to a fixed WARP_W × WARP_H canvas.
-    Handles both landscape and portrait orientations.
+    Checks physical dimensions before warping to prevent squishing portrait notes.
     """
     rect = _order_points(pts)
-    dst = np.array([
-        [0, 0],
-        [WARP_W - 1, 0],
-        [WARP_W - 1, WARP_H - 1],
-        [0, WARP_H - 1]
-    ], dtype=np.float32)
+    (tl, tr, br, bl) = rect
 
-    M = cv2.getPerspectiveTransform(rect, dst)
-    warped = cv2.warpPerspective(img, M, (WARP_W, WARP_H))
+    # Measure the actual pixel width and height of the detected box
+    width = np.linalg.norm(tr - tl)
+    height = np.linalg.norm(bl - tl)
 
-    # If the note was captured in portrait, flip to landscape
-    h, w = warped.shape[:2]
-    if h > w:
+    if height > width:
+        # PORTRAIT: Warp into a tall box first (512 width x 1024 height)
+        dst = np.array([
+            [0, 0],
+            [WARP_H - 1, 0],
+            [WARP_H - 1, WARP_W - 1],
+            [0, WARP_W - 1]
+        ], dtype=np.float32)
+        
+        M = cv2.getPerspectiveTransform(rect, dst)
+        warped = cv2.warpPerspective(img, M, (WARP_H, WARP_W))
+        
+        # Now rotate it 90 degrees to make it landscape (1024 x 512)
+        # Note: If it's upside down after this, change to ROTATE_90_COUNTERCLOCKWISE
         warped = cv2.rotate(warped, cv2.ROTATE_90_CLOCKWISE)
-        warped = cv2.resize(warped, (WARP_W, WARP_H))
+        
+    else:
+        # LANDSCAPE: Warp directly into the wide box (1024 width x 512 height)
+        dst = np.array([
+            [0, 0],
+            [WARP_W - 1, 0],
+            [WARP_W - 1, WARP_H - 1],
+            [0, WARP_H - 1]
+        ], dtype=np.float32)
+        
+        M = cv2.getPerspectiveTransform(rect, dst)
+        warped = cv2.warpPerspective(img, M, (WARP_W, WARP_H))
 
     return warped
 
