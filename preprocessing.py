@@ -31,7 +31,7 @@ def _to_grayscale(img: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
 
-def _blur(gray: np.ndarray, ksize: int = 5) -> np.ndarray:
+def _blur(gray: np.ndarray, ksize: int = 7) -> np.ndarray:
     """Gaussian blur to suppress noise."""
     return cv2.GaussianBlur(gray, (ksize, ksize), 0)
 
@@ -45,8 +45,8 @@ def _adaptive_threshold(blurred: np.ndarray) -> np.ndarray:
         blurred, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY_INV,
-        blockSize=15,
-        C=4
+        blockSize=21,
+        C=8
     )
 
 
@@ -57,8 +57,8 @@ def _morphology(binary: np.ndarray) -> np.ndarray:
     """
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
     closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
-    dilated = cv2.dilate(closed, kernel, iterations=1)
-    return dilated
+    # dilated = cv2.dilate(closed, kernel, iterations=1)
+    return closed
 
 
 def _find_note_contour(processed: np.ndarray) -> Optional[np.ndarray]:
